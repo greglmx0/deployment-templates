@@ -1,0 +1,14 @@
+ARG NODE_VERSION=22.1.0
+ARG ALPINE_VERSION=3.19
+
+FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
+
+WORKDIR /usr/src/app
+
+COPY ${BUILD_DIR:-.output} ${BUILD_DIR:-.output}/
+
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+
+EXPOSE ${APP_PORT:-3000}
+CMD ["node", "${BUILD_DIR:-.output}/server/index.mjs"]

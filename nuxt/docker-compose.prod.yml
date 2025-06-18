@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  ${SERVICE_NAME:-app}:
+    image: ${DOCKER_IMAGE_NAME:-app-prod}
+    container_name: ${CONTAINER_NAME:-app-prod}
+    build:
+      context: .
+      dockerfile: ${DOCKERFILE_NAME:-Dockerfile.prod}
+    ports:
+      - "${APP_PORT:-3000}:${APP_PORT:-3000}"
+    environment:
+      - NODE_ENV=production
+      - API_URL=${API_URL}
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-f",
+          "http://localhost:${HEALTHCHECK_PORT:-3000}${HEALTHCHECK_PATH:-/health}",
+        ]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    networks:
+      - ${DOCKER_NETWORK_NAME:-app-network}
+
+networks:
+  ${DOCKER_NETWORK_NAME:-app-network}:
+    external: true

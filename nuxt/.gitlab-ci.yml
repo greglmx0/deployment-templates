@@ -1,0 +1,96 @@
+# prérequis sur le serveur distant :
+#  - Docker installés
+#  - SSH configuré pour l'utilisateur qui exécute le script
+#  - Un répertoire /app/${PROJECT_NAME} créé et accessible en écriture
+#  - Le réseau Docker ${PROJECT_NAME}-network créé (ou le script le créera si nécessaire)
+#  sudo mkdir -p /app/${PROJECT_NAME}
+#  sudo chown -R $USER:$USER /app/${PROJECT_NAME}
+
+stages:
+  - build
+  - deploy
+
+variables:
+  DOCKER_DRIVER: overlay2
+  GIT_SSL_NO_VERIFY: "true"
+  PROJECT_NAME: ${CI_PROJECT_NAME}
+  DOCKER_IMAGE_NAME: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+  BUILD_DIR: ".output"
+  DOCKERFILE_NAME: "Dockerfile.prod"
+  DOCKER_COMPOSE_FILE: "docker-compose.prod.yml"
+  BUILD_CMD: "npm run build:prod"
+  INSTALL_CMD: "npm ci --omit=dev --no-audit --no-fund"
+  DEPLOY_DIR: "/app/${PROJECT_NAME}"
+  DOCKER_NETWORK_NAME: "${PROJECT_NAME}-network"
+
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - node_modules/
+    - .npm/
+
+.build_template: &build_template
+  stage: build
+  image: node:22-alpine
+  before_script:
+    - apk add --no-cache git
+  script:
+    - echo "Installing dependencies..."
+    - ${INSTALL_CMD}
+    - echo "Building production assets..."
+    - ${BUILD_CMD}
+  artifacts:
+    paths:
+      - ${BUILD_DIR}/
+      - ${DOCKERFILE_NAME}
+      - ${DOCKER_COMPOSE_FILE}
+      - package*.json
+    expire_in: 1 hour
+  only:
+    - main
+
+.deploy_template: &deploy_template
+  stage: deploy
+  image: docker:latest
+  services:
+    - docker:dind
+  needs: ["build"]
+  before_script:
+    - apk add --no-cache openssh-client rsync
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | base64 -d > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H $SSH_HOST >> ~/.ssh/known_hosts
+  script:
+    - echo "Copying files to remote server..."
+    - rsync -avz -e "ssh -i ~/.ssh/id_rsa" ${DOCKERFILE_NAME} ${SSH_USER}@${SSH_HOST}:${DEPLOY_DIR}/${DOCKERFILE_NAME}
+    - rsync -avz -e "ssh -i ~/.ssh/id_rsa" ${DOCKER_COMPOSE_FILE} ${SSH_USER}@${SSH_HOST}:${DEPLOY_DIR}/${DOCKER_COMPOSE_FILE}
+    - rsync -avz --delete -e "ssh -i ~/.ssh/id_rsa" ${BUILD_DIR}/ ${SSH_USER}@${SSH_HOST}:${DEPLOY_DIR}/${BUILD_DIR}/
+    - ssh -i ~/.ssh/id_rsa ${SSH_USER}@${SSH_HOST} "
+      cd ${DEPLOY_DIR} &&
+
+      echo 'Ensuring network exists...' &&
+      docker network inspect ${DOCKER_NETWORK_NAME} >/dev/null 2>&1 || docker network create ${DOCKER_NETWORK_NAME} &&
+
+      echo 'Building and starting new containers...' &&
+      docker compose -f ${DOCKER_COMPOSE_FILE} build --no-cache --pull &&
+
+      echo 'Stopping and removing old containers...' &&
+      docker compose -f ${DOCKER_COMPOSE_FILE} down -v --remove-orphans &&
+
+      echo 'Starting containers...' &&
+      docker compose -f ${DOCKER_COMPOSE_FILE} up -d --force-recreate &&
+
+      echo 'Cleaning up old images and volumes...' &&
+      docker system prune -af --volumes
+
+      echo 'Deployment completed successfully!'
+      "
+  only:
+    - main
+# build:
+#   <<: *build_template
+
+# deploy:
+#   <<: *deploy_template
+
