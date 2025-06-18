@@ -1,0 +1,136 @@
+name: Build & Deploy Nuxt 3 Frontend (reusable)
+
+on:
+  workflow_call:
+    # Paramètres configurables
+    inputs:
+      node-version:
+        description: "Version de Node.js"
+        required: false
+        default: "20"
+      cache-dependency-path:
+        description: "Fichier de lock pour le cache (npm/yarn)"
+        required: false
+        default: "package-lock.json"
+      install-command:
+        description: "Commande d’installation"
+        required: false
+        default: "npm ci"
+      build-command:
+        description: "Commande de build"
+        required: false
+        default: "npm run build"
+      output-dir:
+        description: "Répertoire de sortie Nuxt (.output)"
+        required: false
+        default: ".output"
+      dockerfile:
+        description: "Nom du Dockerfile de prod"
+        required: false
+        default: "Dockerfile.prod"
+      compose-file:
+        description: "Nom du docker-compose de prod"
+        required: false
+        default: "docker-compose.prod.yml"
+      artifact-name:
+        description: "Nom de l’artifact uploadé"
+        required: false
+        default: "frontend-build"
+      artifact-path:
+        description: "Chemin relatif du dossier à uploader"
+        required: false
+        default: "deploy/"
+      artifact-retention-days:
+        description: "Durée de rétention (jours) de l’artifact"
+        required: false
+        default: 1
+      remote-target-path:
+        description: "Chemin absolu de déploiement sur le serveur"
+        required: true
+    # Les secrets obligatoires
+    secrets:
+      VPS_HOST:
+        required: true
+      VPS_USERNAME:
+        required: true
+      SSH_PRIVATE_KEY:
+        required: true
+      VPS_PORT:
+        required: false
+        default: "22"
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+      - name: Install dependencies
+        run: ${{ inputs.install-command }}
+
+      - name: Build Nuxt app
+        run: ${{ inputs.build-command }}
+        env:
+          NODE_ENV: production
+
+      - name: Prepare deployment files
+        run: |
+          rm -rf deploy
+          mkdir -p deploy
+          cp -R ${{ inputs.output-dir }} ${{ inputs.dockerfile }} ${{ inputs.compose-file }} deploy/
+
+      - name: List deploy folder
+        run: ls -la deploy/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+          retention-days: ${{ inputs.artifact-retention-days }}
+          include-hidden-files: true
+
+  deploy:
+    name: Deploy to VPS
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: deploy/
+
+      - name: Copy files to VPS
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          source: "deploy/*"
+          target: ${{ inputs.remote-target-path }}
+          strip_components: 1
+          overwrite: true
+
+      - name: Restart Docker containers
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          script: |
+            cd ${{ inputs.remote-target-path }}
+            docker compose -f ${{ inputs.compose-file }} down
+            docker compose -f ${{ inputs.compose-file }} up -d
+            docker system prune -f
